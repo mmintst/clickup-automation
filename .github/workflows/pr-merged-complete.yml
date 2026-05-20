@@ -7,6 +7,9 @@ on:
     types:
       - closed
 
+permissions:
+  pull-requests: write
+
 jobs:
   update-clickup-status:
     # Only runs when the PR was actually merged (not just closed)
