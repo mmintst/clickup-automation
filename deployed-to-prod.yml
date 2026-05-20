@@ -1,0 +1,53 @@
+name: ClickUp — Deployed to Main → Prod
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  update-clickup-to-prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50  # Fetch recent commits to scan for task IDs
+
+      - name: Extract ClickUp Task IDs from recent commits
+        id: extract
+        run: |
+          # Scan the last 20 commit messages for CU-xxxxxxx task IDs
+          TASK_IDS=$(git log -20 --pretty=format:"%s %b" | grep -oP '(?i)CU-\K[a-z0-9]+' | sort -u | tr '\n' ' ')
+
+          if [ -z "$TASK_IDS" ]; then
+            echo "No ClickUp Task IDs found in recent commits. Skipping."
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found Task IDs: $TASK_IDS"
+            echo "task_ids=$TASK_IDS" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update ClickUp tasks to Prod
+        if: steps.extract.outputs.found == 'true'
+        run: |
+          for TASK_ID in ${{ steps.extract.outputs.task_ids }}; do
+            echo "Updating task: $TASK_ID"
+
+            RESPONSE=$(curl -s -o /tmp/clickup_${TASK_ID}.json -w "%{http_code}" \
+              -X PUT "https://api.clickup.com/api/v2/task/${TASK_ID}" \
+              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d '{"status": "prod"}')
+
+            echo "HTTP Status for $TASK_ID: $RESPONSE"
+            cat /tmp/clickup_${TASK_ID}.json
+
+            if [ "$RESPONSE" -eq 200 ]; then
+              echo "✅ Task $TASK_ID → Prod"
+            else
+              echo "⚠️ Failed to update task $TASK_ID (HTTP $RESPONSE)"
+            fi
+          done
