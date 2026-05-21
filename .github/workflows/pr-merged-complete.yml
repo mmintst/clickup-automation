@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   update-clickup-status:
-    # Only runs when the PR was actually merged (not just closed)
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -20,7 +19,6 @@ jobs:
       - name: Extract ClickUp Task ID from PR title
         id: extract
         run: |
-          # Looks for CU-xxxxxxx pattern in the PR title
           TASK_ID=$(echo "${{ github.event.pull_request.title }}" | grep -oP '(?i)CU-\K[a-z0-9]+' | head -1)
 
           if [ -z "$TASK_ID" ]; then
