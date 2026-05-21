@@ -1,9 +1,9 @@
-name: ClickUp — Deployed to Main → Prod
+name: ClickUp — Released → Prod
 
 on:
-  push:
-    branches:
-      - main
+  release:
+    types:
+      - published
 
 jobs:
   update-clickup-to-prod:
@@ -13,16 +13,31 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 50  # Fetch recent commits to scan for task IDs
+          fetch-depth: 0  # Full history needed to compare tags
 
-      - name: Extract ClickUp Task IDs from recent commits
+      - name: Extract ClickUp Task IDs from commits since last release
         id: extract
         run: |
-          # Scan the last 20 commit messages for CU-xxxxxxx task IDs
-          TASK_IDS=$(git log -20 --pretty=format:"%s %b" | grep -oP '(?i)CU-\K[a-z0-9]+' | sort -u | tr '\n' ' ')
+          # Get the current tag
+          CURRENT_TAG="${{ github.event.release.tag_name }}"
+          echo "Current release tag: $CURRENT_TAG"
+
+          # Get the previous tag (the one before this release)
+          PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found — scanning last 50 commits"
+            COMMIT_RANGE="HEAD~50..HEAD"
+          else
+            echo "Comparing $PREVIOUS_TAG → $CURRENT_TAG"
+            COMMIT_RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+          fi
+
+          # Extract all unique ClickUp task IDs in that range
+          TASK_IDS=$(git log $COMMIT_RANGE --pretty=format:"%s %b" | grep -oP '(?i)CU-\K[a-z0-9]+' | sort -u | tr '\n' ' ')
 
           if [ -z "$TASK_IDS" ]; then
-            echo "No ClickUp Task IDs found in recent commits. Skipping."
+            echo "No ClickUp Task IDs found in commits for this release. Skipping."
             echo "found=false" >> $GITHUB_OUTPUT
           else
             echo "Found Task IDs: $TASK_IDS"
@@ -34,7 +49,7 @@ jobs:
         if: steps.extract.outputs.found == 'true'
         run: |
           for TASK_ID in ${{ steps.extract.outputs.task_ids }}; do
-            echo "Updating task: $TASK_ID"
+            echo "Updating task: $TASK_ID → prod"
 
             RESPONSE=$(curl -s -o /tmp/clickup_${TASK_ID}.json -w "%{http_code}" \
               -X PUT "https://api.clickup.com/api/v2/task/${TASK_ID}" \
