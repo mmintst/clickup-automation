@@ -1,39 +1,69 @@
+# ============================================================
+# WORKFLOW: GitHub Release Published → ClickUp status "Prod"
+# Triggers when you manually publish a Release on GitHub
+# (Repo → Releases → Draft a new release → Publish).
+# It scans all commits between the previous release tag and
+# the new one, finds every ClickUp task ID mentioned,
+# and updates all of them to "prod" via the ClickUp API.
+# ============================================================
+
 name: ClickUp — Released → Prod
 
 on:
   release:
     types:
-      - published
+      - published   # Only fires when a Release is published (not drafted or edited)
+                    # To trigger: go to GitHub → Releases → publish a new release with a tag e.g. v1.0.1
 
 jobs:
   update-clickup-to-prod:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on a fresh GitHub-hosted Linux machine
 
     steps:
+      # ----------------------------------------------------------
+      # STEP 1: Check out the repository code
+      # fetch-depth: 0 = fetch the FULL git history (not just latest commit)
+      # This is required so we can compare tags and read all commit messages
+      # ----------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history needed to compare tags
+          fetch-depth: 0
 
+      # ----------------------------------------------------------
+      # STEP 2: Find all ClickUp task IDs in commits since the last release
+      # Compares the new release tag against the previous tag to get
+      # only the commits that belong to this release — not older ones
+      # ----------------------------------------------------------
       - name: Extract ClickUp Task IDs from commits since last release
         id: extract
         run: |
-          # Get the current tag
+          # Get the tag name of the release that just triggered this workflow
+          # e.g. "v1.0.1"
           CURRENT_TAG="${{ github.event.release.tag_name }}"
           echo "Current release tag: $CURRENT_TAG"
 
-          # Get the previous tag (the one before this release)
+          # List all tags sorted by date, exclude the current one, take the most recent
+          # This gives us the previous release tag to compare against
           PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -1)
 
           if [ -z "$PREVIOUS_TAG" ]; then
+            # No previous tag exists — this is the first release
+            # Fall back to scanning the last 50 commits
             echo "No previous tag found — scanning last 50 commits"
             COMMIT_RANGE="HEAD~50..HEAD"
           else
             echo "Comparing $PREVIOUS_TAG → $CURRENT_TAG"
+            # Only look at commits introduced in this release
             COMMIT_RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
           fi
 
-          # Extract all unique ClickUp task IDs in that range
+          # git log = list commits in the range
+          # --pretty=format:"%s %b" = print subject line + body of each commit message
+          # grep -oP = extract only the matching pattern
+          # (?i)CU-\K[a-z0-9]+ = find "CU-xxxxxxx" task IDs (case-insensitive)
+          # sort -u = remove duplicates
+          # tr '\n' ' ' = join results into a single space-separated string
           TASK_IDS=$(git log $COMMIT_RANGE --pretty=format:"%s %b" | grep -oP '(?i)CU-\K[a-z0-9]+' | sort -u | tr '\n' ' ')
 
           if [ -z "$TASK_IDS" ]; then
@@ -41,28 +71,37 @@ jobs:
             echo "found=false" >> $GITHUB_OUTPUT
           else
             echo "Found Task IDs: $TASK_IDS"
-            echo "task_ids=$TASK_IDS" >> $GITHUB_OUTPUT
+            echo "task_ids=$TASK_IDS" >> $GITHUB_OUTPUT   # Pass all IDs to the next step
             echo "found=true" >> $GITHUB_OUTPUT
           fi
 
+      # ----------------------------------------------------------
+      # STEP 3: Loop through every task ID found and update each
+      # one to "prod" via the ClickUp API
+      # Only runs if Step 2 found at least one task ID
+      # ----------------------------------------------------------
       - name: Update ClickUp tasks to Prod
         if: steps.extract.outputs.found == 'true'
         run: |
+          # Loop over each task ID in the space-separated list
           for TASK_ID in ${{ steps.extract.outputs.task_ids }}; do
             echo "Updating task: $TASK_ID → prod"
 
+            # Call ClickUp API to update this task's status
+            # Same curl pattern as the other workflow — see pr-merged-complete.yml for flag explanations
             RESPONSE=$(curl -s -o /tmp/clickup_${TASK_ID}.json -w "%{http_code}" \
               -X PUT "https://api.clickup.com/api/v2/task/${TASK_ID}" \
-              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+              -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \   # API token from GitHub Secrets
               -H "Content-Type: application/json" \
-              -d '{"status": "prod"}')
+              -d '{"status": "prod"}')   # "prod" must match your ClickUp status name exactly
 
             echo "HTTP Status for $TASK_ID: $RESPONSE"
-            cat /tmp/clickup_${TASK_ID}.json
+            cat /tmp/clickup_${TASK_ID}.json   # Print full API response for debugging
 
             if [ "$RESPONSE" -eq 200 ]; then
               echo "✅ Task $TASK_ID → Prod"
             else
+              # Don't exit 1 here — keep going so other tasks still get updated
               echo "⚠️ Failed to update task $TASK_ID (HTTP $RESPONSE)"
             fi
           done
