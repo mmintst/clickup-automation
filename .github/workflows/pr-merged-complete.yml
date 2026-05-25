@@ -1,19 +1,27 @@
 # ============================================================
-# WORKFLOW: PR Merged → ClickUp status "Complete"
-# Triggers when a Pull Request targeting "main" is merged.
-# It reads the ClickUp task ID from the PR title,
-# updates that task's status to "complete" via ClickUp API,
-# then posts a confirmation comment on the PR.
+# WORKFLOW: PR Lifecycle → ClickUp status sync
+#
+# Trigger 1: PR opened → "Dev In Progress"
+#   When a PR targeting main is opened, the linked ClickUp
+#   task moves from "Ready For Dev" to "Dev In Progress".
+#
+# Trigger 2: PR merged → "SIT"
+#   When the PR is merged into main, the linked ClickUp
+#   task moves to "SIT" and a comment is posted on the PR.
+#
+# In both cases the ClickUp task ID is read from the PR title.
+# Example PR title: "CU-86exnj4pk - fix login bug"
 # ============================================================
 
-name: ClickUp — PR Merged → Complete
+name: ClickUp — PR Lifecycle Sync
 
 on:
   pull_request:
     branches:
       - main        # Only watch PRs that are merging INTO main
     types:
-      - closed      # "closed" covers both merged and manually closed PRs
+      - opened      # Fires when a new PR is created
+      - closed      # Fires when a PR is merged or manually closed
                     # We filter for merged-only in the job condition below
 
 # Grant this workflow permission to post comments on PRs
@@ -21,10 +29,76 @@ permissions:
   pull-requests: write
 
 jobs:
+  # ============================================================
+  # JOB 1: PR Opened → ClickUp "Dev In Progress"
+  # ============================================================
+  update-clickup-dev-in-progress:
+    # Only runs when a new PR is opened (not on merge/close)
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------------
+      # STEP 1: Parse the ClickUp task ID out of the PR title
+      # Looks for the pattern "CU-xxxxxxx" (case-insensitive)
+      # ----------------------------------------------------------
+      - name: Extract ClickUp Task ID from PR title
+        id: extract
+        run: |
+          # grep -oP = only print the match, using Perl-compatible regex
+          # (?i) = case-insensitive
+          # CU-\K = match "CU-" but exclude it from the result (\K = forget prefix)
+          # [a-z0-9]+ = capture the alphanumeric task ID after "CU-"
+          # head -1 = take only the first match (in case there are multiple)
+          TASK_ID=$(echo "${{ github.event.pull_request.title }}" | grep -oP '(?i)CU-\K[a-z0-9]+' | head -1)
+
+          if [ -z "$TASK_ID" ]; then
+            # -z checks if the variable is empty (no match found)
+            echo "No ClickUp Task ID found in PR title. Skipping."
+            echo "found=false" >> $GITHUB_OUTPUT
+          else
+            echo "Found Task ID: $TASK_ID"
+            echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ----------------------------------------------------------
+      # STEP 2: Call ClickUp API to move task to "Dev In Progress"
+      # Only runs if Step 1 found a valid task ID
+      # ----------------------------------------------------------
+      - name: Update ClickUp task status to Dev In Progress
+        if: steps.extract.outputs.found == 'true'
+        run: |
+          # curl flags:
+          #   -s = silent mode (no progress bar)
+          #   -o = save response body to a file (so we can print it for debugging)
+          #   -w "%{http_code}" = print only the HTTP status code as the return value
+          #   -X PUT = use HTTP PUT method (required by ClickUp API to update a task)
+          #   -H = set request headers
+          #   -d = request body in JSON format
+          RESPONSE=$(curl -s -o /tmp/clickup_response.json -w "%{http_code}" \
+            -X PUT "https://api.clickup.com/api/v2/task/${{ steps.extract.outputs.task_id }}" \
+            -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "dev in progress"}')   # Must match your ClickUp status name exactly
+
+          echo "HTTP Status: $RESPONSE"
+          cat /tmp/clickup_response.json   # Print the full API response for debugging
+
+          if [ "$RESPONSE" -ne 200 ]; then
+            echo "Failed to update ClickUp task. Check your API token and task ID."
+            exit 1
+          fi
+
+          echo "✅ ClickUp task ${{ steps.extract.outputs.task_id }} updated to Dev In Progress"
+
+  # ============================================================
+  # JOB 2: PR Merged → ClickUp "SIT"
+  # ============================================================
   update-clickup-status:
-    # This condition ensures the job only runs when the PR was actually
-    # merged — not when someone closes a PR without merging it
-    if: github.event.pull_request.merged == true
+    # Only runs when the PR was actually merged — not when someone
+    # closes a PR without merging, and not when a PR is opened
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest  # Run on a fresh GitHub-hosted Linux machine
 
     steps:
@@ -57,7 +131,7 @@ jobs:
       # STEP 2: Call the ClickUp API to update the task status
       # Only runs if Step 1 found a valid task ID
       # ----------------------------------------------------------
-      - name: Update ClickUp task status to Complete
+      - name: Update ClickUp task status to SIT
         if: steps.extract.outputs.found == 'true'   # Skip if no task ID was found
         run: |
           # curl flags:
@@ -71,7 +145,7 @@ jobs:
             -X PUT "https://api.clickup.com/api/v2/task/${{ steps.extract.outputs.task_id }}" \
             -H "Authorization: ${{ secrets.CLICKUP_API_TOKEN }}" \   # API token from GitHub Secrets
             -H "Content-Type: application/json" \
-            -d '{"status": "complete"}')   # "complete" must match your ClickUp status name exactly
+            -d '{"status": "sit"}')   # "sit" must match your ClickUp status name exactly
 
           echo "HTTP Status: $RESPONSE"
           cat /tmp/clickup_response.json   # Print the full API response for debugging
@@ -82,7 +156,7 @@ jobs:
             exit 1   # Fail the workflow so the error is visible in the Actions tab
           fi
 
-          echo "✅ ClickUp task ${{ steps.extract.outputs.task_id }} updated to Complete"
+          echo "✅ ClickUp task ${{ steps.extract.outputs.task_id }} updated to SIT"
 
       # ----------------------------------------------------------
       # STEP 3: Post a comment on the PR confirming the update
@@ -100,5 +174,5 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `✅ ClickUp task **CU-${{ steps.extract.outputs.task_id }}** has been updated to **Complete**.`
+              body: `✅ ClickUp task **CU-${{ steps.extract.outputs.task_id }}** has been updated to **SIT**.`
             })
